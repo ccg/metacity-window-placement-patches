@@ -1,0 +1,341 @@
+diff -ur metacity-2.10.2/src/common.h metacity-2.10.2.patched/src/common.h
+--- metacity-2.10.2/src/common.h	2005-01-17 14:25:09.000000000 -0600
++++ metacity-2.10.2.patched/src/common.h	2005-07-13 12:49:48.000000000 -0500
+@@ -151,6 +151,15 @@
+ 
+ typedef enum
+ {
++  META_PLACEMENT_MODE_FIRST_FIT,
++  META_PLACEMENT_MODE_CASCADE,
++  META_PLACEMENT_MODE_CENTER,
++  META_PLACEMENT_MODE_ORIGIN,
++  META_PLACEMENT_MODE_RANDOM
++} MetaPlacementMode;
++
++typedef enum
++{
+   META_ACTION_DOUBLE_CLICK_TITLEBAR_TOGGLE_SHADE,
+   META_ACTION_DOUBLE_CLICK_TITLEBAR_TOGGLE_MAXIMIZE,
+   META_ACTION_DOUBLE_CLICK_TITLEBAR_LAST
+diff -ur metacity-2.10.2/src/metacity.schemas.in metacity-2.10.2.patched/src/metacity.schemas.in
+--- metacity-2.10.2/src/metacity.schemas.in	2005-05-26 10:37:49.000000000 -0500
++++ metacity-2.10.2.patched/src/metacity.schemas.in	2005-07-12 16:18:15.000000000 -0500
+@@ -1919,6 +1919,30 @@
+       </locale>
+     </schema>
+ 
++    <schema>
++      <key>/schemas/apps/metacity/general/placement_mode</key>
++      <applyto>/apps/metacity/general/placement_mode</applyto>
++      <owner>metacity</owner>
++      <type>string</type>
++      <default>first_fit</default>
++      <locale name="C">
++         <short>Window placement behavior</short>
++         <long>
++          Metacity's default window-placement behavior is first-fit,
++          similar to the "smart" window-placement behaviors in some
++          other window managers. It will try to tile windows so that
++          they do not overlap. Set this option to "first_fit" for
++          this behavior.
++
++          This option can be set to "center" to place new windows in
++          the centers of their workspaces, "origin" for the upper-
++          left corners of the workspaces, or "random" to place new
++          windows at random locations within their workspaces.
++         </long>
++
++      </locale>
++    </schema>
++
+ 
+   </schemalist>  
+ </gconfschemafile>
+diff -ur metacity-2.10.2/src/place.c metacity-2.10.2.patched/src/place.c
+--- metacity-2.10.2/src/place.c	2005-05-26 10:37:49.000000000 -0500
++++ metacity-2.10.2.patched/src/place.c	2005-07-13 12:48:27.000000000 -0500
+@@ -636,6 +636,117 @@
+   return retval;
+ }
+ 
++static gboolean
++find_preferred_position (MetaWindow *window,
++                         MetaFrameGeometry *fgeom,
++                         /* visible windows on relevant workspaces */
++                         GList      *windows,
++                         int*        xineramas_list,
++                         int         n_xineramas,
++                         int         x,
++                         int         y,
++                         int        *new_x,
++                         int        *new_y)
++{
++  MetaRectangle rect;
++  MetaRectangle work_area;
++  int i;
++  MetaPlacementMode placement_mode_pref = meta_prefs_get_placement_mode ();
++
++  /* If first_fit placement is the preference, just pass all the
++   * options through to the original find_first_fit function.
++   * Otherwise, process the user preference here.
++   */
++  if (placement_mode_pref == META_PLACEMENT_MODE_FIRST_FIT)
++    {
++      return find_first_fit (window, fgeom, windows,
++                             xineramas_list, n_xineramas,
++                             x, y, new_x, new_y);
++    }
++  else if (placement_mode_pref == META_PLACEMENT_MODE_CASCADE)
++    {
++      /* This is an abuse of find_next_cascade(), because it was not
++       * intended for this use, and because it is not designed to
++       * deal with placement on multiple Xineramas.
++       */
++      find_next_cascade (window, fgeom, windows, x, y, new_x, new_y);
++      return TRUE;
++    }
++
++  rect.width = window->rect.width;
++  rect.height = window->rect.height;
++
++  if (fgeom)
++    {
++      rect.width += fgeom->left_width + fgeom->right_width;
++      rect.height += fgeom->top_height + fgeom->bottom_height;
++    }
++
++  for (i = 0; i < n_xineramas; i++)
++    {
++      meta_topic (META_DEBUG_XINERAMA,
++                  "Natural xinerama %d is %d,%d %dx%d\n",
++                  i,
++                  window->screen->xinerama_infos[xineramas_list[i]].x_origin,
++                  window->screen->xinerama_infos[xineramas_list[i]].y_origin,
++                  window->screen->xinerama_infos[xineramas_list[i]].width,
++                  window->screen->xinerama_infos[xineramas_list[i]].height);
++    }
++
++  /* try each xinerama in the natural ordering in turn */
++  for (i = 0; i < n_xineramas; i++)
++    {
++      meta_window_get_work_area_for_xinerama (window,
++                                              xineramas_list[i],
++                                              &work_area);
++
++      /* Cannot use rect_fits_in_work_area here because that function
++       * also checks the x & y position of rect, but those are not set
++       * yet in this case.
++       */
++      if ((rect.width <= work_area.width) && (rect.height <= work_area.height))
++        {
++          switch (placement_mode_pref)
++            {
++              case META_PLACEMENT_MODE_CENTER:
++                /* This is a plain centering, different from center_tile */
++                *new_x = work_area.x + ((work_area.width - rect.width) / 2);
++                *new_y = work_area.y + ((work_area.height - rect.height) / 2);
++                break;
++
++              case META_PLACEMENT_MODE_ORIGIN:
++                *new_x = work_area.x;
++                *new_y = work_area.y;
++                break;
++
++              case META_PLACEMENT_MODE_RANDOM:
++                *new_x = (int) ((float) (work_area.width - rect.width) *
++                                ((float) rand() / (float) RAND_MAX));
++                *new_y = (int) ((float) (work_area.height - rect.height) *
++                                ((float) rand() / (float) RAND_MAX));
++                *new_x += work_area.x;
++                *new_y += work_area.y;
++                break;
++
++              default:
++                meta_warning ("Unknown window-placement option chosen.\n");
++                return FALSE;
++                break;
++            }
++
++          if (fgeom)
++            {
++              *new_x += fgeom->left_width;
++              *new_y += fgeom->top_height;
++            }
++
++          return TRUE;
++        }
++    }
++
++  return FALSE;
++}
++
+ void
+ meta_window_place (MetaWindow        *window,
+                    MetaFrameGeometry *fgeom,
+@@ -853,9 +964,9 @@
+ 					 &xineramas_list,
+ 					 &n_xineramas);
+ 
+-  if (find_first_fit (window, fgeom, windows,
+-                      xineramas_list, n_xineramas,
+-                      x, y, &x, &y))
++  if (find_preferred_position (window, fgeom, windows,
++                               xineramas_list, n_xineramas,
++                               x, y, &x, &y))
+     goto done_check_denied_focus;
+ 
+   /* This is a special-case origin-cascade so that windows that are
+diff -ur metacity-2.10.2/src/prefs.c metacity-2.10.2.patched/src/prefs.c
+--- metacity-2.10.2/src/prefs.c	2005-05-26 10:37:49.000000000 -0500
++++ metacity-2.10.2.patched/src/prefs.c	2005-07-13 12:54:32.000000000 -0500
+@@ -41,6 +41,7 @@
+  */
+ #define KEY_MOUSE_BUTTON_MODS "/apps/metacity/general/mouse_button_modifier"
+ #define KEY_FOCUS_MODE "/apps/metacity/general/focus_mode"
++#define KEY_PLACEMENT_MODE "/apps/metacity/general/placement_mode"
+ #define KEY_ACTION_DOUBLE_CLICK_TITLEBAR "/apps/metacity/general/action_double_click_titlebar"
+ #define KEY_AUTO_RAISE "/apps/metacity/general/auto_raise"
+ #define KEY_AUTO_RAISE_DELAY "/apps/metacity/general/auto_raise_delay"
+@@ -78,6 +79,7 @@
+ static PangoFontDescription *titlebar_font = NULL;
+ static MetaVirtualModifier mouse_button_mods = Mod1Mask;
+ static MetaFocusMode focus_mode = META_FOCUS_MODE_CLICK;
++static MetaPlacementMode placement_mode = META_PLACEMENT_MODE_FIRST_FIT;
+ static char* current_theme = NULL;
+ static int num_workspaces = 4;
+ static MetaActionDoubleClickTitlebar action_double_click_titlebar =
+@@ -119,6 +121,7 @@
+ static gboolean update_titlebar_font      (const char *value);
+ static gboolean update_mouse_button_mods  (const char *value);
+ static gboolean update_focus_mode         (const char *value);
++static gboolean update_placement_mode     (const char *value);
+ static gboolean update_theme              (const char *value);
+ static gboolean update_visual_bell        (gboolean v1, gboolean v2);
+ static gboolean update_visual_bell_type   (const char *value);
+@@ -335,6 +338,12 @@
+   update_focus_mode (str_val);
+   g_free (str_val);  
+ 
++  str_val = gconf_client_get_string (default_client, KEY_PLACEMENT_MODE,
++                                     &err);
++  cleanup_error (&err);
++  update_placement_mode (str_val);
++  g_free (str_val);  
++
+   str_val = gconf_client_get_string (default_client,
+                                      KEY_ACTION_DOUBLE_CLICK_TITLEBAR,
+ 				     &err);
+@@ -524,6 +533,22 @@
+       if (update_focus_mode (str))
+         queue_changed (META_PREF_FOCUS_MODE);
+     }
++  else if (strcmp (key, KEY_PLACEMENT_MODE) == 0)
++    {
++      const char *str;
++
++      if (value && value->type != GCONF_VALUE_STRING)
++        {
++          meta_warning (_("GConf key \"%s\" is set to an invalid type\n"),
++                        KEY_PLACEMENT_MODE);
++          goto out;
++        }
++
++      str = value ? gconf_value_get_string (value) : NULL;
++
++      if (update_placement_mode (str))
++          queue_changed (META_PREF_PLACEMENT_MODE);
++    }
+   else if (strcmp (key, KEY_THEME) == 0)
+     {
+       const char *str;
+@@ -915,6 +940,48 @@
+ 
+ #ifdef HAVE_GCONF
+ static gboolean
++update_placement_mode (const char *value)
++{
++  MetaPlacementMode old_policy;
++
++  old_policy = placement_mode;
++
++  if (value != NULL)
++    {
++      if ((g_ascii_strcasecmp (value, "smart") == 0) ||
++          (g_ascii_strcasecmp (value, "first_fit") == 0))
++        {
++          placement_mode = META_PLACEMENT_MODE_FIRST_FIT;
++        }
++      else if (g_ascii_strcasecmp (value, "cascade") == 0)
++        {
++          placement_mode = META_PLACEMENT_MODE_CASCADE;
++        }
++      else if (g_ascii_strcasecmp (value, "center") == 0)
++        {
++          placement_mode = META_PLACEMENT_MODE_CENTER;
++        }
++      else if (g_ascii_strcasecmp (value, "origin") == 0)
++        {
++          placement_mode = META_PLACEMENT_MODE_ORIGIN;
++        }
++      else if (g_ascii_strcasecmp (value, "random") == 0)
++        {
++          placement_mode = META_PLACEMENT_MODE_RANDOM;
++        }
++      else
++        {
++          meta_warning (_("GConf key '%s' is set to an invalid value\n"),
++                        KEY_PLACEMENT_MODE);
++        }
++    }
++
++  return (old_policy != placement_mode);
++}
++#endif /* HAVE_GCONF */
++
++#ifdef HAVE_GCONF
++static gboolean
+ update_theme (const char *value)
+ {
+   char *old_theme;
+@@ -959,6 +1026,12 @@
+   return focus_mode;
+ }
+ 
++MetaPlacementMode
++meta_prefs_get_placement_mode (void)
++{
++  return placement_mode;
++}
++
+ const char*
+ meta_prefs_get_theme (void)
+ {
+@@ -1386,6 +1459,9 @@
+     case META_PREF_FOCUS_MODE:
+       return "FOCUS_MODE";
+ 
++    case META_PREF_PLACEMENT_MODE:
++      return "PLACEMENT_MODE";
++
+     case META_PREF_THEME:
+       return "THEME";
+ 
+diff -ur metacity-2.10.2/src/prefs.h metacity-2.10.2.patched/src/prefs.h
+--- metacity-2.10.2/src/prefs.h	2005-05-26 10:37:49.000000000 -0500
++++ metacity-2.10.2.patched/src/prefs.h	2005-07-12 15:21:11.000000000 -0500
+@@ -30,6 +30,7 @@
+ {
+   META_PREF_MOUSE_BUTTON_MODS,
+   META_PREF_FOCUS_MODE,
++  META_PREF_PLACEMENT_MODE,
+   META_PREF_ACTION_DOUBLE_CLICK_TITLEBAR,
+   META_PREF_AUTO_RAISE,
+   META_PREF_AUTO_RAISE_DELAY,
+@@ -64,6 +65,7 @@
+ 
+ MetaVirtualModifier         meta_prefs_get_mouse_button_mods  (void);
+ MetaFocusMode               meta_prefs_get_focus_mode         (void);
++MetaPlacementMode           meta_prefs_get_placement_mode     (void);
+ const char*                 meta_prefs_get_theme              (void);
+ /* returns NULL if GTK default should be used */
+ const PangoFontDescription* meta_prefs_get_titlebar_font      (void);
